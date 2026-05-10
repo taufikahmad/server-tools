@@ -84,11 +84,11 @@ def firewall_open_ports(ports,tcp=True,udp=False):
   if fw=="iptables":
     for p in ps:
       if tcp:
-        run(["iptables","-C","INPUT","-p","tcp","--dport",str(p),"-j","ACCEPT"],check=False,capture=True)
-        run(["iptables","-I","INPUT","-p","tcp","--dport",str(p),"-j","ACCEPT"],check=False,capture=True)
+        if run(["iptables","-C","INPUT","-p","tcp","--dport",str(p),"-j","ACCEPT"],check=False,capture=True).returncode!=0:
+          run(["iptables","-I","INPUT","-p","tcp","--dport",str(p),"-j","ACCEPT"],check=False,capture=True)
       if udp:
-        run(["iptables","-C","INPUT","-p","udp","--dport",str(p),"-j","ACCEPT"],check=False,capture=True)
-        run(["iptables","-I","INPUT","-p","udp","--dport",str(p),"-j","ACCEPT"],check=False,capture=True)
+        if run(["iptables","-C","INPUT","-p","udp","--dport",str(p),"-j","ACCEPT"],check=False,capture=True).returncode!=0:
+          run(["iptables","-I","INPUT","-p","udp","--dport",str(p),"-j","ACCEPT"],check=False,capture=True)
 
 def journal_tail(service,lines=80):
   if not shutil.which("journalctl"):

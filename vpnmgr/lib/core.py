@@ -102,12 +102,50 @@ def pkg_mgr(osinfo):
     return "dnf" if shutil.which("dnf") else "yum"
   return None
 
+def disable_apt_suite(suite):
+  suite=(suite or "").strip()
+  if not suite:
+    return False
+  changed=False
+  paths=[]
+  p=Path("/etc/apt/sources.list")
+  if p.exists():
+    paths.append(p)
+  d=Path("/etc/apt/sources.list.d")
+  if d.exists():
+    paths+=sorted(d.glob("*.list"))
+  for p in paths:
+    txt=read_text(str(p),"")
+    if not txt:
+      continue
+    out=[]
+    touched=False
+    for ln in txt.splitlines():
+      s=ln.strip()
+      if s and not s.startswith("#") and suite in ln:
+        out.append("# "+ln)
+        touched=True
+      else:
+        out.append(ln)
+    if touched:
+      file_backup(str(p))
+      write_text(str(p),"\n".join(out).rstrip()+"\n",0o644)
+      changed=True
+  return changed
+
 def ensure_packages(osinfo,pkgs):
   pm=pkg_mgr(osinfo)
   if not pm:
     raise RuntimeError("unsupported distro")
   if pm=="apt":
-    run([pm,"update"],check=True,capture=False)
+    p=run([pm,"update"],check=False,capture=True)
+    if p.returncode!=0 and ("bullseye-backports" in (p.stdout or "") or "bullseye-backports" in (p.stderr or "")):
+      if disable_apt_suite("bullseye-backports"):
+        p=run([pm,"update"],check=False,capture=True)
+    if p.returncode!=0:
+      out=(p.stdout or "").strip()
+      err=(p.stderr or "").strip()
+      raise RuntimeError(f"apt update failed rc={p.returncode} out={out} err={err}")
     run([pm,"install","-y"]+list(pkgs),check=True,capture=False)
     return
   run([pm,"install","-y"]+list(pkgs),check=True,capture=False)
