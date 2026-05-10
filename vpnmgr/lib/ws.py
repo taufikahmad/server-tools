@@ -17,7 +17,7 @@ def ensure_ws_server_script():
   if Path(WS_SERVER_PATH).exists():
     file_backup(WS_SERVER_PATH)
   script="""#!/usr/bin/env python3
-import argparse,select,socket,ssl,threading,time
+import argparse,select,socket,ssl,sys,threading,time
 
 BUFLEN=16384
 TIMEOUT=60
@@ -58,8 +58,8 @@ def connect_target(hostport,default_host):
   else:
     host=hp
     port=22
-  addr=socket.getaddrinfo(host,port,0,socket.SOCK_STREAM)[0][-1]
-  s=socket.socket(socket.AF_INET if ":" not in host else socket.AF_INET6,socket.SOCK_STREAM)
+  (fam,typ,proto,_,addr)=socket.getaddrinfo(host,port,0,socket.SOCK_STREAM)[0]
+  s=socket.socket(fam,typ,proto)
   s.connect(addr)
   return s
 
@@ -141,7 +141,7 @@ def handle(conn,args):
 
 def main():
   ap=argparse.ArgumentParser()
-  ap.add_argument("--bind",default="0.0.0.0")
+  ap.add_argument("--bind",default="::")
   ap.add_argument("--port",type=int,required=True)
   ap.add_argument("--path",default="")
   ap.add_argument("--default-host",default="127.0.0.1:22")
@@ -150,22 +150,45 @@ def main():
   ap.add_argument("--cert",default="")
   ap.add_argument("--key",default="")
   args=ap.parse_args()
+  s=None
   fam=socket.AF_INET6 if ":" in args.bind else socket.AF_INET
-  s=socket.socket(fam,socket.SOCK_STREAM)
-  if fam==socket.AF_INET6:
+  for try_fam,try_bind in ((fam,args.bind),(socket.AF_INET6,"::"),(socket.AF_INET,"0.0.0.0")):
     try:
-      s.setsockopt(socket.IPPROTO_IPV6,socket.IPV6_V6ONLY,0)
+      s=socket.socket(try_fam,socket.SOCK_STREAM)
+      if try_fam==socket.AF_INET6:
+        try:
+          s.setsockopt(socket.IPPROTO_IPV6,socket.IPV6_V6ONLY,0)
+        except Exception:
+          pass
+      s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+      try:
+        s.setsockopt(socket.SOL_SOCKET,getattr(socket,"SO_REUSEPORT"),1)
+      except Exception:
+        pass
+      s.bind((try_bind,args.port))
+      break
     except Exception:
-      pass
-  s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
-  s.bind((args.bind,args.port))
+      try:
+        if s:
+          s.close()
+      except Exception:
+        pass
+      s=None
+  if s is None:
+    print("bind failed",file=sys.stderr)
+    sys.exit(1)
   s.listen(256)
   ctx=None
   if args.tls:
     ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(certfile=args.cert,keyfile=args.key)
   while True:
-    c,_=s.accept()
+    try:
+      c,_=s.accept()
+    except Exception as e:
+      print(str(e),file=sys.stderr)
+      time.sleep(1)
+      continue
     if ctx:
       try:
         c=ctx.wrap_socket(c,server_side=True)
@@ -189,9 +212,9 @@ def make_wsraw_unit(port,secure,ws_path,target,passwd):
   ensure_ws_server_script()
   if secure:
     cert,key=tls_paths_required()
-    cmd=f"/usr/bin/env python3 {WS_SERVER_PATH} --bind 0.0.0.0 --port {int(port)} --path={ws_path} --default-host={target} --pass={passwd} --tls --cert={cert} --key={key}"
+    cmd=f"/usr/bin/env python3 {WS_SERVER_PATH} --bind :: --port {int(port)} --path={ws_path} --default-host={target} --pass={passwd} --tls --cert={cert} --key={key}"
   else:
-    cmd=f"/usr/bin/env python3 {WS_SERVER_PATH} --bind 0.0.0.0 --port {int(port)} --path={ws_path} --default-host={target} --pass={passwd}"
+    cmd=f"/usr/bin/env python3 {WS_SERVER_PATH} --bind :: --port {int(port)} --path={ws_path} --default-host={target} --pass={passwd}"
   name=unit_name(port,secure)
   u=f"""[Unit]
 Description=VPNMgr SSH WebSocket ({'TLS' if secure else 'Plain'}) {int(port)}

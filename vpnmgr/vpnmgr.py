@@ -1,4 +1,4 @@
-import json,sys
+import json,os,shlex,socket,sys
 from pathlib import Path
 from lib.core import is_root,detect_os,ensure_packages,prompt,yn,random_password,run,read_text,write_text,file_backup,load_state
 from lib.system import enable_ip_forward,firewall_open_ports,have_systemd,systemctl,journal_tail,status_tcp_ports
@@ -7,6 +7,35 @@ from lib.ws import configure,restart_all,stop_all,remove_all,DEFAULT_WS_PORTS,DE
 from lib.ssh import ssh_add_user,ssh_del_user,ssh_list_users,ssh_enable_2fa,ssh_disable_2fa
 from lib.monitor import ensure_vnstat,vnstat_summary
 from lib.backup import create_backup,restore_backup,remove_state
+
+def parse_ports(s,default):
+  out=[]
+  for x in (s or "").split(","):
+    x=x.strip()
+    if not x:
+      continue
+    try:
+      p=int(x)
+    except Exception:
+      continue
+    if 1<=p<=65535:
+      out.append(p)
+  return out or list(default)
+
+def env_bool(k,default=False):
+  v=os.getenv(k,"").strip().lower()
+  if not v:
+    return bool(default)
+  return v in ("1","y","yes","true","t","on")
+
+def install_menu_command():
+  src=str(Path(__file__).resolve())
+  dst="/usr/local/bin/menu"
+  if Path(dst).exists():
+    file_backup(dst)
+  s="#!/usr/bin/env bash\nexec /usr/bin/env python3 "+shlex.quote(src)+" \"$@\"\n"
+  write_text(dst,s,0o755)
+  print("OK")
 
 def show_client_export():
   st=load_state()
@@ -78,7 +107,9 @@ def menu():
     print("run as root",file=sys.stderr)
     return 1
   items=[
-    ("Install/Configure SSH WebSocket (80/8080/2082) + optional WSS 443",lambda:configure_ws(osinfo)),
+    ("Install 'menu' command",install_menu_command),
+    ("Install/Configure SSH WebSocket (auto defaults)",lambda:configure_ws_auto(osinfo)),
+    ("Install/Configure SSH WebSocket (manual)",lambda:configure_ws_manual(osinfo)),
     ("Restart WebSocket services",lambda:(restart_all(),print("OK"))),
     ("Stop WebSocket services",lambda:(stop_all(),print("OK"))),
     ("Remove WebSocket services",lambda:(remove_all(),print("OK"))),
@@ -122,18 +153,36 @@ def menu():
       print(f"error: {e}")
   return 0
 
-def configure_ws(osinfo):
+def configure_ws_auto(osinfo):
+  ws_path=os.getenv("VPNMGR_WS_PATH",DEFAULT_WS_PATH).strip() or DEFAULT_WS_PATH
+  target=os.getenv("VPNMGR_TARGET",DEFAULT_SSH_TARGET).strip() or DEFAULT_SSH_TARGET
+  ports=parse_ports(os.getenv("VPNMGR_WS_PORTS",""),DEFAULT_WS_PORTS)
+  wss=env_bool("VPNMGR_WSS",True)
+  passwd=os.getenv("VPNMGR_WS_PASS","").strip()
+  if not passwd:
+    passwd=random_password(20)
+  tls_mode=os.getenv("VPNMGR_TLS_MODE","").strip().lower()
+  domain=os.getenv("VPNMGR_DOMAIN","").strip()
+  email=os.getenv("VPNMGR_EMAIL","").strip()
+  if wss:
+    if tls_mode.startswith("let") or (not tls_mode and domain):
+      if domain:
+        gen_letsencrypt(osinfo,domain,email,ensure_packages)
+      else:
+        ensure_packages(osinfo,["openssl"])
+        gen_self_signed(socket.getfqdn() or "localhost")
+    else:
+      ensure_packages(osinfo,["openssl"])
+      gen_self_signed(domain or socket.getfqdn() or "localhost")
+  configure(ws_path,ports,wss,target,passwd)
+  print(json.dumps({"ws_path":ws_path,"target":target,"ws_ports":ports,"wss":bool(wss),"password":passwd},indent=2))
+
+def configure_ws_manual(osinfo):
   ws_path=prompt("WebSocket path",DEFAULT_WS_PATH)
   target=prompt("SSH target host:port",DEFAULT_SSH_TARGET)
   passwd=prompt("WebSocket password (X-Pass optional)","")
   raw=prompt("WS ports (comma separated)",",".join(str(x) for x in DEFAULT_WS_PORTS))
-  ports=[]
-  for x in raw.split(","):
-    x=x.strip()
-    if x:
-      ports.append(int(x))
-  if not ports:
-    ports=DEFAULT_WS_PORTS[:]
+  ports=parse_ports(raw,DEFAULT_WS_PORTS)
   wss=yn("Enable TLS WebSocket on 443 (wss)",True)
   if wss:
     mode=prompt("TLS mode (letsencrypt/self)","letsencrypt").strip().lower()
